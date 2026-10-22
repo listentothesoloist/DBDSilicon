@@ -1,0 +1,144 @@
+name: Obelisk
+options:
+  minimumXcodeGenVersion: 2.46.0
+  deploymentTarget:
+    macOS: "26.4"
+  createIntermediateGroups: true
+  developmentLanguage: en
+configFiles:
+  Debug: Config/Signing.xcconfig
+  Release: Config/Signing.Release.xcconfig
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MACOSX_DEPLOYMENT_TARGET: "26.4"
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+    ARCHS: $(NATIVE_ARCH_ACTUAL)
+    ONLY_ACTIVE_ARCH: YES
+    SWIFT_STRICT_CONCURRENCY: complete
+packages:
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    exactVersion: 2.10.0
+targets:
+  Obelisk:
+    type: application
+    platform: macOS
+    sources:
+      - path: Obelisk
+        excludes:
+          - "Bridge/Generated/*.h"
+          - "Bridge/Generated/*.modulemap"
+    configFiles:
+      Debug: Config/App.xcconfig
+      Release: Config/App.xcconfig
+    dependencies:
+      - package: Sparkle
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_FILE: Config/Info.plist
+        INFOPLIST_KEY_CFBundleDevelopmentRegion: en
+        SWIFT_EMIT_LOC_STRINGS: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        INFOPLIST_KEY_NSHighResolutionCapable: YES
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: "Games launched by Obelisk can use your microphone for in-game voice chat."
+        ENABLE_APP_SANDBOX: NO
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_ENTITLEMENTS: Config/Obelisk.entitlements
+        SWIFT_INCLUDE_PATHS: "$(SRCROOT)/Obelisk/Bridge/Generated"
+        HEADER_SEARCH_PATHS: "$(SRCROOT)/Obelisk/Bridge/Generated"
+        LIBRARY_SEARCH_PATHS: "$(SRCROOT)/../../build/rust/$(CONFIGURATION)"
+        OTHER_LDFLAGS: "$(inherited) -lobelisk_bridge -framework Security -framework SystemConfiguration -liconv"
+        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../Frameworks"
+    preBuildScripts:
+      - name: Build Rust and generate Swift bindings
+        script: '"$SRCROOT/../../scripts/build-rust.sh"'
+        basedOnDependencyAnalysis: false
+      - name: Build and sign native Steam helper
+        script: '"$SRCROOT/../../scripts/build-steam-native.sh"'
+        basedOnDependencyAnalysis: false
+    postBuildScripts:
+      - name: Sign Sparkle's helpers
+        script: '"$SRCROOT/../../scripts/sign-sparkle.sh"'
+        basedOnDependencyAnalysis: false
+  DbDLauncher:
+    type: application
+    platform: macOS
+    sources:
+      - path: Obelisk
+        excludes:
+          - "Bridge/Generated/*.h"
+          - "Bridge/Generated/*.modulemap"
+          - "App/ObeliskApp.swift"
+          - "App/AppUpdates.swift"
+      - path: DbDLauncher
+        excludes:
+          - "LICENSE.txt"
+      - path: DbDLauncher/LICENSE.txt
+        buildPhase: resources
+      - path: ../../packaging/runtime-fixes/runtime-fixes.tar.xz
+        buildPhase: resources
+    configFiles:
+      Debug: Config/Launcher.xcconfig
+      Release: Config/Launcher.xcconfig
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_FILE: Config/LauncherInfo.plist
+        INFOPLIST_KEY_CFBundleDevelopmentRegion: en
+        SWIFT_EMIT_LOC_STRINGS: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        INFOPLIST_KEY_NSHighResolutionCapable: YES
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: "Dead by Daylight can use your microphone for in-game voice chat."
+        ENABLE_APP_SANDBOX: NO
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_ENTITLEMENTS: Config/Obelisk.entitlements
+        SWIFT_INCLUDE_PATHS: "$(SRCROOT)/Obelisk/Bridge/Generated"
+        HEADER_SEARCH_PATHS: "$(SRCROOT)/Obelisk/Bridge/Generated"
+        LIBRARY_SEARCH_PATHS: "$(SRCROOT)/../../build/rust/$(CONFIGURATION)"
+        OTHER_LDFLAGS: "$(inherited) -lobelisk_bridge -framework Security -framework SystemConfiguration -liconv"
+        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../Frameworks"
+    preBuildScripts:
+      - name: Build Rust and generate Swift bindings
+        script: '"$SRCROOT/../../scripts/build-rust.sh"'
+        basedOnDependencyAnalysis: false
+        # Declared so Swift compiles after the script, from the bindings it just wrote: an undeclared file
+        # the script changes is read as it was when the build started.
+        outputFiles:
+          - $(SRCROOT)/Obelisk/Bridge/Generated/ObeliskBridge.swift
+          - $(SRCROOT)/Obelisk/Bridge/Generated/ObeliskBridgeFFI.h
+          - $(SRCROOT)/Obelisk/Bridge/Generated/module.modulemap
+          - $(SRCROOT)/../../build/rust/$(CONFIGURATION)/libobelisk_bridge.a
+      - name: Build and sign native Steam helper
+        script: '"$SRCROOT/../../scripts/build-steam-native.sh"'
+        basedOnDependencyAnalysis: false
+    postBuildScripts:
+      - name: Keep the English localization only
+        script: |
+          find "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH" -maxdepth 1 -name '*.lproj' ! -name en.lproj ! -name Base.lproj -exec rm -rf {} +
+        basedOnDependencyAnalysis: false
+  ObeliskTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: ObeliskTests
+    dependencies:
+      - target: Obelisk
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.zagrios.obelisk.tests
+        SWIFT_INCLUDE_PATHS: "$(SRCROOT)/Obelisk/Bridge/Generated"
+schemes:
+  Obelisk:
+    build:
+      targets:
+        Obelisk: all
+    test:
+      targets:
+        - ObeliskTests
+  DbDLauncher:
+    build:
+      targets:
+        DbDLauncher: all

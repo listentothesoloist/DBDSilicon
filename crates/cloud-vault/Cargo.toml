@@ -1,0 +1,24 @@
+[package]
+name = "cloud-vault"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tempfile.workspace = true
+uuid.workspace = true
+sha2 = "0.10"
+
+[features]
+# The individual upload steps, for tests that interrupt an upload between them.
+testing = []
+
+[dev-dependencies]
+cloud-vault = { path = ".", features = ["testing"] }
+
+[lints]
+workspace = true

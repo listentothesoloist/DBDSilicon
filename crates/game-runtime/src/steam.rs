@@ -1,0 +1,377 @@
+//! The Steam adapter of the Game session supervisor.
+use crate::{
+    Config, Error, HostState,
+    installations::Receipt,
+    protocol::Credentials,
+    runtimes::Runtime,
+    supervisor::{self, Record, Target},
+};
+use obelisk_core::{Platform, transfer::CancelToken};
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+
+pub mod account_session;
+pub mod cloud;
+pub mod content;
+pub(crate) mod launch;
+mod windows;
+pub use launch::serve;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Steam;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Store {
+    pub app_id: u32,
+    pub host: HostState,
+    #[serde(flatten)]
+    pub requests: crate::GameRequests,
+}
+impl Store {
+    /// A new session of game `app_id`, its host online.
+    pub fn new(app_id: u32) -> Self {
+        Self {
+            app_id,
+            host: HostState::Online,
+            requests: crate::GameRequests::default(),
+        }
+    }
+    /// What the host tells now.
+    pub(crate) fn apply(&mut self, update: &crate::HostUpdate) {
+        self.host = update.state;
+        self.requests = update.requests.clone();
+    }
+}
+
+/// What the player asks of a running Steam game, through its supervisor.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum Control {
+    /// Obelisk's overlay opened or closed over the game.
+    Overlay { active: bool, user_initiated: bool },
+    /// The player accepted `friend`'s invitation into the game.
+    AcceptInvite {
+        friend: u64,
+        target: crate::protocol::InviteTarget,
+    },
+    /// The player's answer to the purchase the game waits on.
+    AuthorizeMicroTxn { order_id: u64, approve: bool },
+}
+
+/// What a Steam game joins as it starts, as Steam's client starts a game
+/// from an invitation it accepted (steamui's `steam://joinlobby` and
+/// `steam://rungame`): the lobby or connect string a running game accepts.
+pub type Join = crate::protocol::InviteTarget;
+
+impl Join {
+    /// The arguments it adds after the game's own, for a build of
+    /// `platform`: `+connect_lobby <lobby>`, or the connect string split as
+    /// that platform's command line does, never through a shell.
+    pub fn arguments(&self, platform: Platform) -> Vec<String> {
+        match self {
+            Self::Lobby { lobby_id } => vec!["+connect_lobby".into(), lobby_id.to_string()],
+            Self::Connect { connect } => obelisk_core::launch::parse_arguments(connect, platform)
+                .unwrap_or_else(|_| connect.split_whitespace().map(str::to_owned).collect()),
+        }
+    }
+}
+
+pub type Snapshot = Record<Steam>;
+pub type Client = supervisor::Client<Steam>;
+pub type IdleGuard = supervisor::IdleGuard<Steam>;
+
+#[derive(Serialize, Deserialize)]
+pub struct Request {
+    pub root: PathBuf,
+    pub id: String,
+    pub config: Config,
+    pub target: Target,
+    #[serde(default)]
+    pub cloud: Option<cloud::Config>,
+}
+
+impl supervisor::Provider for Steam {
+    type Account = u64;
+    type Store = Store;
+    type Control = Control;
+    type Error = Error;
+    const SUPERVISE: &'static str = "supervise";
+    const CANCELLED: &'static [&'static str] = &["backend.steam.runtime.cancelled"];
+
+    fn valid(record: &Record<Self>) -> bool {
+        record.store.app_id != 0 && record.account_id != 0
+    }
+
+    fn cancelled(error: &Error) -> bool {
+        matches!(
+            error,
+            Error::Cancelled | Error::Cloud(cloud::Failure::Cancelled)
+        )
+    }
+
+    fn same_game(a: &Store, b: &Store) -> bool {
+        a.app_id == b.app_id
+    }
+
+    /// The UI reports host loss and keeps protecting a game that still runs.
+    fn orphaned(record: &mut Record<Self>, _owned: bool) {
+        record.store.host = HostState::Lost;
+    }
+}
+
+/// The launch of the Steam game `receipt` installed, started as `target`
+/// says, with its Cloud, ready for its supervisor. A Windows game runs in
+/// Wine, in the installation's own prefix, which is readied first.
+pub fn prepare(
+    locations: &crate::Locations,
+    receipt: &Receipt<Steam>,
+    target: &obelisk_core::launch::LaunchTarget,
+) -> Result<Request, Error> {
+    let home = &locations.home;
+    let install = Path::new(&receipt.directory);
+    let app_id = receipt.product.app_id;
+    let (wine, target, steam_api) = match receipt.windows(locations)? {
+        Some(windows) => {
+            let wine = windows.ready(locations, target, &windows::Prefix { install })?;
+            let launched = windows::target(&wine, &receipt.wine_game(), target, home)?;
+            (Some(wine), launched, None)
+        }
+        None => {
+            let (launched, steam_api) = native_target(install, target, home, app_id)?;
+            (None, launched, Some(steam_api))
+        }
+    };
+    let cloud = cloud::Config {
+        root: locations.cloud_archive.clone(),
+        home: home.clone(),
+        install: install.to_owned(),
+        app_id,
+        prefix: wine.as_ref().map(|wine| wine.prefix.clone()),
+    };
+    Ok(Request {
+        root: locations.steam_sessions.clone(),
+        id: String::new(),
+        config: Config {
+            app_id,
+            cloud_save_roots: vec![install.to_owned()],
+            helpers: locations.helpers.clone(),
+            package: locations.steam_runtime_package.clone(),
+            cache: locations.steam_runtime_cache.clone(),
+            diagnostics: crate::diagnostics::folder(
+                &locations.home,
+                crate::queue::Storefront::Steam,
+            ),
+            steam_api,
+            home: home.clone(),
+            wine,
+        },
+        cloud: Some(cloud),
+        target,
+    })
+}
+
+/// The Mac game `target` names inside `install`, and its Steam API library.
+fn native_target(
+    install: &Path,
+    target: &obelisk_core::launch::LaunchTarget,
+    home: &Path,
+    app_id: u32,
+) -> Result<(Target, PathBuf), Error> {
+    let steam_api = launch::steam_api(target)?;
+    let (target, _) = crate::native::target(
+        install,
+        target,
+        target.arguments.clone(),
+        crate::native::environment(home),
+        crate::diagnostics::game_log(home, crate::diagnostics::Game::Steam(app_id), Platform::Mac),
+    )?;
+    Ok((target, steam_api))
+}
+
+/// Starts the supervisor of `request`'s game, as a new Game session;
+/// `cancelled` stops a start in progress.
+pub fn start(
+    helper: &Path,
+    credentials: &Credentials,
+    mut request: Request,
+    cancelled: &CancelToken,
+) -> Result<Client, Error> {
+    request.id = uuid::Uuid::new_v4().to_string();
+    start_command(
+        helper,
+        credentials,
+        request,
+        cancelled,
+        Client::supervisor_command(helper),
+        supervisor::client::inspect,
+    )
+}
+
+pub(crate) fn start_command(
+    helper: &Path,
+    credentials: &Credentials,
+    request: Request,
+    cancelled: &CancelToken,
+    command: std::process::Command,
+    probe: supervisor::client::Probe,
+) -> Result<Client, Error> {
+    let root = request.root.clone();
+    let id = request.id.clone();
+    let app_id = request.config.app_id;
+    let account_id = credentials.steam_id;
+    Ok(Client::start_with(
+        &root,
+        helper,
+        id,
+        command,
+        probe,
+        |pipe| {
+            credentials
+                .write(&mut *pipe)
+                .map_err(|_| supervisor::Error::StartFailed)?;
+            supervisor::storage::send(pipe, &request)
+        },
+        |ack| ack.account_id == account_id && ack.store.app_id == app_id,
+        || cancelled.is_cancelled(),
+    )?)
+}
+
+/// What a Steam installation names of its game: the app, and the language
+/// whose depots it installs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Product {
+    pub app_id: u32,
+    pub language: String,
+}
+
+impl crate::installations::Storefront for Steam {
+    type Product = Product;
+    type Join = Join;
+    const PLATFORM: obelisk_core::platform::Spelling = steam_kit::client::PLATFORM;
+    const RECEIPTS_UNAVAILABLE: &'static str = "model.steam.receiptsUnavailable";
+    const RECEIPTS_NOT_SAVED: &'static str = "model.steam.receiptsNotSaved";
+    const GAMES_DIRECTORY: &'static str = "Steam";
+    const QUEUE: crate::queue::Storefront = crate::queue::Storefront::Steam;
+    fn product_game(product: &Product) -> u32 {
+        product.app_id
+    }
+    fn profile_game(product: &Product) -> crate::profile::Game<'_> {
+        crate::profile::Game::Steam {
+            app_id: product.app_id,
+        }
+    }
+    fn receipt_id(app_id: &u32, platform: Platform) -> String {
+        format!("{app_id}-{}", Self::PLATFORM.name(platform))
+    }
+    fn transfer_name(app_id: &u32) -> String {
+        app_id.to_string()
+    }
+}
+
+impl crate::sessions::Storefront for Steam {
+    type Game = u32;
+    const BEGINS: bool = false;
+    const INVALID_SESSION: &'static str = "backend.steam.runtime.invalidSession";
+    const SESSION_FAILED: &'static str = "backend.steam.runtime.startFailed";
+    /// Every Steam game runs beside Obelisk's Steam host, whatever its
+    /// platform or engine.
+    const RUNTIMES: &'static [Runtime] = &[Runtime::SteamComponents];
+    fn game(store: &Store) -> u32 {
+        store.app_id
+    }
+}
+
+/// What the player asks of a running Steam game.
+impl crate::sessions::Sessions<Steam> {
+    /// Obelisk's overlay opened, or closed, over session `id`'s game, which
+    /// Steam's overlay would tell it. `user_initiated` when the player opened
+    /// it, not the game.
+    pub fn overlay_state(
+        &self,
+        id: &str,
+        active: bool,
+        user_initiated: bool,
+    ) -> Result<(), crate::sessions::Failure> {
+        self.control(
+            id,
+            Control::Overlay {
+                active,
+                user_initiated,
+            },
+        )
+    }
+
+    /// The player accepted `friend`'s invitation into session `id`'s running
+    /// game: the game joins as if Steam's overlay had accepted it.
+    pub fn accept_invite(
+        &self,
+        id: &str,
+        friend: u64,
+        target: crate::protocol::InviteTarget,
+    ) -> Result<(), crate::sessions::Failure> {
+        if !crate::protocol::individual(friend) || !target.valid() {
+            return Err(crate::sessions::Failure::Failed(
+                <Steam as crate::sessions::Storefront>::INVALID_SESSION.to_owned(),
+            ));
+        }
+        self.control(id, Control::AcceptInvite { friend, target })
+    }
+
+    /// The player's answer to the purchase `order_id` session `id`'s game
+    /// waits on.
+    pub fn authorize_microtxn(
+        &self,
+        id: &str,
+        order_id: u64,
+        approve: bool,
+    ) -> Result<(), crate::sessions::Failure> {
+        self.control(id, Control::AuthorizeMicroTxn { order_id, approve })
+    }
+}
+
+#[cfg(test)]
+mod join_tests {
+    use super::Join;
+    use obelisk_core::Platform;
+
+    #[test]
+    fn a_join_adds_what_steams_client_adds_to_the_command_line() {
+        let lobby = Join::Lobby {
+            lobby_id: 109_775_244_421_126_053,
+        };
+        assert!(lobby.valid());
+        assert_eq!(
+            lobby.arguments(Platform::Windows),
+            ["+connect_lobby", "109775244421126053"]
+        );
+        let connect = Join::Connect {
+            connect: r#"+connect "10.0.0.1:27015" +password "two words""#.into(),
+        };
+        for platform in [Platform::Windows, Platform::Mac] {
+            assert_eq!(
+                connect.arguments(platform),
+                ["+connect", "10.0.0.1:27015", "+password", "two words"],
+                "{platform:?}"
+            );
+        }
+        // A Mac command line it cannot read splits on spaces.
+        let unbalanced = Join::Connect {
+            connect: "+connect 'x y".into(),
+        };
+        assert_eq!(unbalanced.arguments(Platform::Mac), ["+connect", "'x", "y"]);
+        for invalid in [
+            Join::Lobby {
+                lobby_id: 76_561_197_960_265_729,
+            },
+            Join::Connect {
+                connect: String::new(),
+            },
+            Join::Connect {
+                connect: "a".repeat(256),
+            },
+        ] {
+            assert!(!invalid.valid(), "{invalid:?}");
+        }
+    }
+}

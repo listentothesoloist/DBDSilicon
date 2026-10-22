@@ -1,0 +1,314 @@
+//! GOG's part of an account's installations: where each build lives, the
+//! credentials every account call renews and saves first, and what GOG's
+//! network does for them. Only the network is a seam; tests stand in for it.
+use super::{Configuration, Error, Gog, Product};
+use crate::{
+    Locations, cloud_status,
+    installations::{self, BoxFuture, Credentials, Receipt, Transfer, blocking},
+    sessions::{self, Admission, Failure, Storefront as _, Supervised, failed},
+};
+use gog_kit::{GogError, client::Client as GogClient};
+use obelisk_core::{Platform, installation::TransferProgress, transfer::CancelToken};
+use std::{path::Path, sync::Arc};
+
+/// What an account's installations ask of GOG's network. Every call may wait
+/// on it.
+pub trait Network: Send + Sync + 'static {
+    /// Renews the account's credentials before a long account call.
+    fn prepare(&self) -> BoxFuture<'_, Result<(), Failure>>;
+    /// The account the session is signed in to now.
+    fn account_id(&self) -> BoxFuture<'_, Result<String, Failure>>;
+    /// The build a Transfer without a platform installs, with the depots of
+    /// `language`: the Mac build when its game runs natively on Apple
+    /// silicon, else the Windows build.
+    fn platform<'a>(
+        &'a self,
+        product: &'a Product,
+        language: &'a str,
+    ) -> BoxFuture<'a, Result<Platform, Failure>>;
+    /// Runs `transfer` into the folder it names, with the depots of `language`.
+    fn download<'a>(
+        &'a self,
+        transfer: &'a Transfer<Gog>,
+        language: &'a str,
+    ) -> BoxFuture<'a, Result<gog_kit::client::Installation, Failure>>;
+    fn progress(&self) -> Option<TransferProgress>;
+    fn cancel(&self);
+    /// Whether GOG's current build differs from the one `receipt` installed.
+    fn update_available<'a>(
+        &'a self,
+        receipt: &'a Receipt<Gog>,
+    ) -> BoxFuture<'a, Result<bool, Failure>>;
+}
+
+impl Network for GogClient {
+    fn prepare(&self) -> BoxFuture<'_, Result<(), Failure>> {
+        Box::pin(async move { GogClient::prepare(self).await.map_err(failed) })
+    }
+    fn account_id(&self) -> BoxFuture<'_, Result<String, Failure>> {
+        Box::pin(async move {
+            self.credentials()
+                .await
+                .map(|credentials| credentials.user_id)
+                .map_err(failed)
+        })
+    }
+    fn platform<'a>(
+        &'a self,
+        product: &'a Product,
+        language: &'a str,
+    ) -> BoxFuture<'a, Result<Platform, Failure>> {
+        Box::pin(async move {
+            GogClient::platform(self, &product.product_id, language)
+                .await
+                .map_err(failed)
+        })
+    }
+    fn download<'a>(
+        &'a self,
+        transfer: &'a Transfer<Gog>,
+        language: &'a str,
+    ) -> BoxFuture<'a, Result<gog_kit::client::Installation, Failure>> {
+        Box::pin(async move {
+            // The Transfer's begin set it; GOG still refuses a download without one.
+            let platform = transfer
+                .platform
+                .ok_or(GogError::Protocol)
+                .map_err(failed)?;
+            GogClient::download(
+                self,
+                &transfer.product.product_id,
+                platform,
+                language,
+                &transfer.directory,
+            )
+            .await
+            .map_err(failed)
+        })
+    }
+    fn progress(&self) -> Option<TransferProgress> {
+        GogClient::progress(self)
+    }
+    fn cancel(&self) {
+        self.cancel_download();
+    }
+    fn update_available<'a>(
+        &'a self,
+        receipt: &'a Receipt<Gog>,
+    ) -> BoxFuture<'a, Result<bool, Failure>> {
+        Box::pin(async move {
+            GogClient::update_available(
+                self,
+                &receipt.product.product_id,
+                receipt.platform,
+                Path::new(&receipt.directory),
+            )
+            .await
+            .map_err(failed)
+        })
+    }
+}
+
+/// One signed-in GOG account's installations, as they reach GOG.
+pub struct Content<N: Network> {
+    network: Arc<N>,
+    credentials: Credentials,
+    /// The language whose depots Transfers install, such as `fr-FR`.
+    language: String,
+    locations: Locations,
+}
+
+impl<N: Network> Content<N> {
+    pub fn new(
+        network: Arc<N>,
+        saved: Arc<dyn Fn() + Send + Sync>,
+        language: String,
+        locations: Locations,
+    ) -> Self {
+        Self {
+            network,
+            credentials: Credentials::new(saved, Gog::SESSION_FAILED),
+            language,
+            locations,
+        }
+    }
+
+    fn configuration(&self, receipt: &Receipt<Gog>) -> Configuration {
+        Configuration {
+            home: self.locations.home.clone(),
+            install: receipt.directory.clone().into(),
+            session_directory: self.locations.gog_sessions.clone(),
+            helper: self.locations.helper.clone(),
+            product_id: receipt.product.product_id.clone(),
+            platform: receipt.platform,
+            title: receipt.name.clone(),
+            prefix: receipt
+                .windows(&self.locations)
+                .ok()
+                .flatten()
+                .map(|windows| windows.prefix().to_owned()),
+        }
+    }
+}
+
+impl<N: Network> installations::Content<Gog> for Content<N> {
+    fn begin<'a>(
+        &'a self,
+        transfer: &'a Transfer<Gog>,
+    ) -> BoxFuture<'a, Result<Platform, Failure>> {
+        Box::pin(async move {
+            // As every GOG account call: renewed and saved credentials first.
+            self.credentials.prepare(self.network.prepare()).await?;
+            match transfer.platform {
+                Some(platform) => Ok(platform),
+                None => {
+                    let platform = self
+                        .network
+                        .platform(&transfer.product, &self.language)
+                        .await;
+                    self.credentials.save_later();
+                    platform
+                }
+            }
+        })
+    }
+    fn download<'a>(
+        &'a self,
+        transfer: &'a Transfer<Gog>,
+    ) -> BoxFuture<'a, Result<Receipt<Gog>, Failure>> {
+        Box::pin(async move {
+            let installed = self.network.download(transfer, &self.language).await;
+            self.credentials.save_later();
+            let installed = installed?;
+            Ok(Receipt {
+                product: Product {
+                    product_id: installed.product_id,
+                },
+                name: transfer.name.clone(),
+                directory: installed.directory,
+                platform: installed.platform,
+                total_bytes: installed.total_bytes,
+                needs_verification: false,
+            })
+        })
+    }
+    fn progress(&self) -> Option<TransferProgress> {
+        self.network.progress()
+    }
+    fn cancel(&self) {
+        self.credentials.cancel();
+        self.network.cancel();
+    }
+    fn update_available<'a>(
+        &'a self,
+        receipt: &'a Receipt<Gog>,
+    ) -> BoxFuture<'a, Result<bool, Failure>> {
+        self.network.update_available(receipt)
+    }
+    fn launch<'a>(
+        &'a self,
+        receipt: &'a Receipt<Gog>,
+        admission: Admission<Gog>,
+        _: Option<&'a std::convert::Infallible>,
+    ) -> BoxFuture<'a, Result<(), Failure>> {
+        Box::pin(async move {
+            admission
+                .hand_off(Handover {
+                    network: self.network.clone(),
+                    configuration: self.configuration(receipt),
+                    windows: receipt.windows(&self.locations).ok().flatten(),
+                    locations: self.locations.clone(),
+                })
+                .await
+        })
+    }
+    /// GOG keeps no Cloud saves for Obelisk yet.
+    fn archive<'a>(&'a self, _: &'a Receipt<Gog>) -> BoxFuture<'a, Result<(), Failure>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn removed<'a>(&'a self, _: &'a Receipt<Gog>) -> BoxFuture<'a, Result<(), Failure>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn directory_name(&self, receipt: &Receipt<Gog>) -> String {
+        gog_kit::client::installation_directory_name(&receipt.product.product_id, receipt.platform)
+    }
+    /// Its installer scripts ran with the old folder: they run again with
+    /// the new one at the next launch.
+    fn relocated(&self, receipt: &Receipt<Gog>, from: &Path) -> Result<(), String> {
+        receipt.relocated(&self.locations, from)?;
+        let Ok(Some(windows)) = receipt.windows(&self.locations) else {
+            return Ok(());
+        };
+        windows
+            .forget_prerequisites(&self.locations, |id| {
+                id.starts_with("gog:isi:") || id.starts_with("gog:installer:")
+            })
+            .map_err(|error| error.to_string())
+    }
+    fn remove_prefix(&self, receipt: &Receipt<Gog>) -> Option<Result<(), String>> {
+        receipt.remove_prefix(&self.locations)
+    }
+    fn maintain<'a>(
+        &'a self,
+        _: &'a String,
+        _: Option<&'a Receipt<Gog>>,
+        _: Arc<crate::cloud::Control>,
+    ) -> BoxFuture<'a, Result<(), Failure>> {
+        Box::pin(async { Err(failed(Error::Unsupported)) })
+    }
+    fn indicators(&self, _: &[String]) -> Result<Vec<(String, cloud_status::Indicator)>, Failure> {
+        Ok(Vec::new())
+    }
+}
+
+/// Starting an installed GOG build: its Wine prefix readied, then its
+/// supervisor.
+struct Handover<N: Network> {
+    network: Arc<N>,
+    configuration: Configuration,
+    /// Set for a Windows build, whose prefix it readies.
+    windows: Option<crate::wine::Installation>,
+    locations: Locations,
+}
+
+impl<N: Network> sessions::Handover<Gog> for Handover<N> {
+    /// The account, and how a Windows build runs.
+    type Prepared = (String, Option<crate::wine::Config>);
+    fn platform(&self) -> Platform {
+        self.configuration.platform
+    }
+    fn prepare(&self) -> BoxFuture<'_, Result<Self::Prepared, Failure>> {
+        Box::pin(async move {
+            let wine = match &self.windows {
+                None => None,
+                Some(windows) => {
+                    let (windows, configuration, locations) = (
+                        windows.clone(),
+                        self.configuration.clone(),
+                        self.locations.clone(),
+                    );
+                    Some(
+                        blocking(Error::Session.to_string(), move || {
+                            super::windows::ready(&windows, &configuration, &locations)
+                        })
+                        .await?
+                        .map_err(failed)?,
+                    )
+                }
+            };
+            Ok((self.network.account_id().await?, wine))
+        })
+    }
+    fn start(
+        self,
+        (account, wine): Self::Prepared,
+        cancel: CancelToken,
+    ) -> Result<Arc<dyn Supervised<Gog>>, String> {
+        super::start(self.configuration, account, wine, cancel)
+            .map(|client| Arc::new(client) as Arc<dyn Supervised<Gog>>)
+            .map_err(|error| error.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests;

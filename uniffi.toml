@@ -1,0 +1,4 @@
+[crates.obelisk_bridge.bindings.swift]
+module_name = "ObeliskBridge"
+ffi_module_name = "ObeliskBridgeFFI"
+generate_module_map = true

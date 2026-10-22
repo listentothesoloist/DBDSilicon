@@ -1,0 +1,7 @@
+// Release builds are what strangers download: Developer ID, timestamped, no debugger entitlement.
+// Signing.local.xcconfig may pin the certificate by its SHA-1 instead of this name.
+DISTRIBUTION_CODE_SIGN_IDENTITY = Developer ID Application
+#include "Signing.xcconfig"
+CODE_SIGN_IDENTITY = $(DISTRIBUTION_CODE_SIGN_IDENTITY)
+CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO
+OTHER_CODE_SIGN_FLAGS = $(inherited) --timestamp

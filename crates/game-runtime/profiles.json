@@ -1,0 +1,308 @@
+{
+  "games": [
+    {
+      "name": "Rocket League",
+      "note": "Its Easy Anti-Cheat refuses Rosetta's Wine (code 206) and loads its Linux module on the Linux engine. Its publisher executable, Launcher.exe, is a .NET program and the engine's Wine has no Mono: the game starts with the Easy Anti-Cheat bootstrapper Launcher.exe would start, with the same arguments.",
+      "epic": {
+        "namespace": "9773aa1aa54f4f7b80e44bef04986cea",
+        "app_name": "Sugar"
+      },
+      "engine": "Linux",
+      "graphics": "Dxmt",
+      "executable": "Binaries/Win64/RocketLeague_EAC.exe"
+    },
+    {
+      "name": "ELDEN RING",
+      "note": "Easy Anti-Cheat, as Rocket League's. It only has Direct3D 12, which D3DMetal renders and DXMT does not. Steam's launch already starts its bootstrapper, start_protected_game.exe.",
+      "steam": 1245620,
+      "engine": "Linux",
+      "graphics": "D3DMetal"
+    },
+    {
+      "name": "Counter-Strike 2",
+      "note": "Renders through DXMT rather than D3DMetal.",
+      "steam": 730,
+      "path": "game/bin/win64/cs2.exe",
+      "graphics": "Dxmt"
+    },
+    {
+      "name": "Fallout 4",
+      "note": "Renders through DXMT rather than D3DMetal. Loads the XAudio2 and X3DAudio DLLs that DirectX's installer puts in the prefix before Wine's own.",
+      "steam": 377160,
+      "path": "Fallout4.exe",
+      "graphics": "Dxmt",
+      "dll_overrides": {
+        "x3daudio1_6": "n,b",
+        "x3daudio1_7": "n,b",
+        "xaudio2_6": "n,b",
+        "xaudio2_7": "n,b"
+      }
+    },
+    {
+      "name": "The Elder Scrolls V: Skyrim Special Edition",
+      "note": "Renders through DXMT rather than D3DMetal. Loads the XAudio2 and X3DAudio DLLs that DirectX's installer puts in the prefix before Wine's own.",
+      "steam": 489830,
+      "path": "SkyrimSE.exe",
+      "graphics": "Dxmt",
+      "dll_overrides": {
+        "x3daudio1_6": "n,b",
+        "x3daudio1_7": "n,b",
+        "xaudio2_6": "n,b",
+        "xaudio2_7": "n,b"
+      }
+    },
+    {
+      "name": "Clair Obscur: Expedition 33",
+      "note": "Renders through DXMT rather than D3DMetal. Loads the Visual C++ runtime DLLs its installer puts in the prefix before Wine's own.",
+      "steam": 1903340,
+      "graphics": "Dxmt",
+      "dll_overrides": {
+        "msvcp140_2": "n,b",
+        "vcruntime140_1": "n,b"
+      }
+    },
+    {
+      "name": "Raft",
+      "note": "Renders through DXMT rather than D3DMetal.",
+      "steam": 648800,
+      "path": "Raft.exe",
+      "graphics": "Dxmt"
+    },
+    {
+      "name": "NieR:Automata",
+      "note": "Renders through DXMT rather than D3DMetal.",
+      "steam": 524220,
+      "path": "NieRAutomata.exe",
+      "graphics": "Dxmt"
+    },
+    {
+      "name": "METAL GEAR SOLID V: THE PHANTOM PAIN",
+      "note": "Renders through DXMT rather than D3DMetal.",
+      "steam": 287700,
+      "path": "mgsvtpp.exe",
+      "graphics": "Dxmt"
+    },
+    {
+      "name": "Dying Light",
+      "note": "Renders through DXMT rather than D3DMetal.",
+      "steam": 239140,
+      "path": "DyingLightGame.exe",
+      "graphics": "Dxmt"
+    },
+    {
+      "name": "Guild Wars 2",
+      "note": "Renders through DXMT rather than D3DMetal.",
+      "steam": 1284210,
+      "path": "Gw2-64.exe",
+      "graphics": "Dxmt"
+    },
+    {
+      "name": "God of War Ragnarök",
+      "note": "Told it runs on a Steam Deck.",
+      "steam": 2322010,
+      "path": "GoWR.exe",
+      "variables": {
+        "SteamDeck": "1"
+      }
+    },
+    {
+      "name": "Grounded",
+      "note": "Never loads SpeechSynthWrapper.dll.",
+      "steam": 962130,
+      "dll_overrides": {
+        "SpeechSynthWrapper": ""
+      }
+    },
+    {
+      "name": "Crysis Remastered",
+      "note": "Renders through DXMT rather than D3DMetal.",
+      "steam": 1715130,
+      "graphics": "Dxmt"
+    },
+    {
+      "name": "BeamNG.drive",
+      "note": "Renders through DXMT rather than D3DMetal.",
+      "steam": 284160,
+      "graphics": "Dxmt"
+    },
+    {
+      "name": "Assetto Corsa Competizione",
+      "note": "Renders through DXMT rather than D3DMetal.",
+      "steam": 805550,
+      "graphics": "Dxmt"
+    },
+    {
+      "name": "Conan Exiles",
+      "note": "Renders through DXMT rather than D3DMetal.",
+      "steam": 440900,
+      "graphics": "Dxmt"
+    },
+    {
+      "name": "Planet Zoo",
+      "note": "Renders through DXMT rather than D3DMetal.",
+      "steam": 703080,
+      "graphics": "Dxmt"
+    },
+    {
+      "name": "ŌKAMI HD",
+      "note": "Renders through DXMT rather than D3DMetal.",
+      "steam": 587620,
+      "graphics": "Dxmt"
+    },
+    {
+      "name": "METAL GEAR SOLID V: GROUND ZEROES",
+      "note": "Renders through DXMT rather than D3DMetal.",
+      "steam": 311340,
+      "graphics": "Dxmt"
+    },
+    {
+      "name": "METAL GEAR SOLID 2: Sons of Liberty - Master Collection Version",
+      "note": "Renders through DXMT rather than D3DMetal.",
+      "steam": 2131640,
+      "graphics": "Dxmt"
+    },
+    {
+      "name": "NieR Replicant ver.1.22474487139...",
+      "note": "Renders through DXMT rather than D3DMetal.",
+      "steam": 1113560,
+      "graphics": "Dxmt"
+    },
+    {
+      "name": "Yakuza Kiwami",
+      "note": "Renders through DXMT rather than D3DMetal.",
+      "steam": 834530,
+      "graphics": "Dxmt"
+    },
+    {
+      "name": "Dark and Darker",
+      "note": "Renders through DXMT rather than D3DMetal.",
+      "steam": 2016590,
+      "graphics": "Dxmt"
+    },
+    {
+      "name": "ICARUS",
+      "note": "Renders through DXMT rather than D3DMetal.",
+      "steam": 1149460,
+      "graphics": "Dxmt"
+    },
+    {
+      "name": "PowerWash Simulator 2",
+      "note": "Renders through DXMT rather than D3DMetal.",
+      "steam": 2968420,
+      "graphics": "Dxmt"
+    },
+    {
+      "name": "F1 2018",
+      "note": "Renders through DXMT rather than D3DMetal.",
+      "steam": 737800,
+      "graphics": "Dxmt"
+    },
+    {
+      "name": "BioShock Remastered",
+      "note": "Renders through DXMT rather than D3DMetal.",
+      "steam": 409710,
+      "graphics": "Dxmt"
+    },
+    {
+      "name": "Mount & Blade II: Bannerlord",
+      "note": "Renders through DXMT rather than D3DMetal.",
+      "steam": 261550,
+      "graphics": "Dxmt"
+    },
+    {
+      "name": "Death's Door",
+      "note": "Renders through DXMT rather than D3DMetal.",
+      "steam": 894020,
+      "path": "DeathsDoor.exe",
+      "graphics": "Dxmt"
+    },
+    {
+      "name": "The Elder Scrolls V: Skyrim",
+      "note": "Loads the XAudio2 and X3DAudio DLLs that DirectX's installer puts in the prefix before Wine's own.",
+      "steam": 72850,
+      "path": "TESV.exe",
+      "dll_overrides": {
+        "x3daudio1_6": "n,b",
+        "x3daudio1_7": "n,b",
+        "xaudio2_6": "n,b",
+        "xaudio2_7": "n,b"
+      }
+    },
+    {
+      "name": "Fallout 76",
+      "note": "Loads the XAudio2 and X3DAudio DLLs that DirectX's installer puts in the prefix before Wine's own.",
+      "steam": 1151340,
+      "path": "Fallout76.exe",
+      "dll_overrides": {
+        "x3daudio1_6": "n,b",
+        "x3daudio1_7": "n,b",
+        "xaudio2_6": "n,b",
+        "xaudio2_7": "n,b"
+      }
+    },
+    {
+      "name": "Age of Empires II: Definitive Edition",
+      "note": "Loads Microsoft's Universal C runtime before Wine's own, where the prefix or the game has it.",
+      "steam": 813780,
+      "path": "AoE2DE_s.exe",
+      "dll_overrides": {
+        "ucrtbase": "n,b"
+      }
+    },
+    {
+      "name": "Age of Empires III: Definitive Edition",
+      "note": "Loads Microsoft's Universal C runtime before Wine's own, where the prefix or the game has it.",
+      "steam": 933110,
+      "path": "AoE3DE_s.exe",
+      "dll_overrides": {
+        "ucrtbase": "n,b"
+      }
+    },
+    {
+      "name": "Resident Evil 7 Biohazard",
+      "note": "Never loads msspatial.dll.",
+      "steam": 418370,
+      "path": "re7.exe",
+      "dll_overrides": {
+        "msspatial": ""
+      }
+    },
+    {
+      "name": "NINJA GAIDEN 2 BLACK",
+      "note": "Loads the Visual C++ runtime DLLs its installer puts in the prefix before Wine's own.",
+      "steam": 3287520,
+      "dll_overrides": {
+        "msvcp140_2": "n,b",
+        "vcruntime140_1": "n,b"
+      }
+    },
+    {
+      "name": "MindsEye",
+      "note": "Loads the Visual C++ runtime DLLs its installer puts in the prefix before Wine's own. Starts windowed.",
+      "steam": 3265250,
+      "arguments": [
+        "-windowed"
+      ],
+      "dll_overrides": {
+        "msvcp140_2": "n,b",
+        "vcruntime140_1": "n,b"
+      }
+    },
+    {
+      "name": "The Callisto Protocol",
+      "note": "Starts with Direct3D 12.",
+      "steam": 1544020,
+      "arguments": [
+        "-dx12"
+      ]
+    },
+    {
+      "name": "DEATH STRANDING 2: ON THE BEACH",
+      "note": "D3DMetal runs it as it runs God of War Ragnarök.",
+      "steam": 3280350,
+      "variables": {
+        "D3DM_EXE_OVERRIDE": "GoWR.exe"
+      }
+    }
+  ]
+}

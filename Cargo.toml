@@ -1,0 +1,77 @@
+[workspace]
+members = [
+    "crates/obelisk-core",
+    "crates/obelisk-bridge",
+    "crates/game-runtime",
+    "crates/cloud-vault",
+    "crates/storefronts/steam-kit",
+    "crates/storefronts/epic-kit",
+    "crates/storefronts/gog-kit",
+]
+resolver = "3"
+exclude = ["crates/steam-native"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+publish = false
+
+[workspace.dependencies]
+obelisk-core = { path = "crates/obelisk-core" }
+game-runtime = { path = "crates/game-runtime" }
+cloud-vault = { path = "crates/cloud-vault" }
+steam-kit = { path = "crates/storefronts/steam-kit" }
+epic-kit = { path = "crates/storefronts/epic-kit" }
+gog-kit = { path = "crates/storefronts/gog-kit" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tempfile = "3"
+uuid = { version = "1", features = ["v4"] }
+uniffi = { version = "=0.32.1" }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros", "net"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "form", "query", "stream"] }
+prost = "0.14"
+bytes = "1"
+base64 = "0.23"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+rsa = { version = "0.9", default-features = false, features = ["std", "u64_digit", "getrandom"] }
+aes = "0.9"
+cbc = { version = "0.2", features = ["alloc", "block-padding"] }
+sha1 = "0.11"
+md-5 = "0.11"
+crc32fast = "1"
+unicode-normalization = "0.1"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+lzma-rs = "0.3"
+ruzstd = "0.9"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"
+
+[profile.release]
+lto = "thin"
+strip = "debuginfo"
+
+# Debug builds otherwise run the byte work unoptimized: SHA-1 hashed about 280 MB/s per thread instead of 3 GB/s,
+# and verifying ELDEN RING's 55 GB before a launch took about 2 minutes instead of 10 seconds.
+[profile.dev.package.sha1]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.md-5]
+opt-level = 3
+[profile.dev.package.crc32fast]
+opt-level = 3
+[profile.dev.package.aes]
+opt-level = 3
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+[profile.dev.package.lzma-rs]
+opt-level = 3
+[profile.dev.package.ruzstd]
+opt-level = 3

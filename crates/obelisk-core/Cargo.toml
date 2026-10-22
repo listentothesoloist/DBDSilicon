@@ -1,0 +1,24 @@
+[package]
+name = "obelisk-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+tokio.workspace = true
+futures-util.workspace = true
+sha1.workspace = true
+md-5.workspace = true
+
+[features]
+# A detached `transfer::Chunks`, for storefront tests that play the network side.
+testing = []
+
+[lints]
+workspace = true

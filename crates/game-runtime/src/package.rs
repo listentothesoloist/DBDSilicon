@@ -1,0 +1,342 @@
+//! Hash-pinned Valve payload. Runtime preparation is local-only: it reads the
+//! payload `crate::valve` downloaded from Valve's CDN, with a Steam game's
+//! Transfer or, when it is still missing, its launch.
+use crate::{Config, Error};
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs::{self, File},
+    io::{Read, Write},
+    path::{Path, PathBuf},
+    sync::{
+        OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
+};
+
+const MANIFEST: &str = include_str!("../runtime-manifest.json");
+pub const HOST: &str = "dbdsilicon-steam-host";
+pub(crate) const ADAPTER: &str = "libobelisk_steam_discovery_adapter.dylib";
+pub(crate) const SDK_INTEL: &str = "dbdsilicon-steam-sdk-x86_64";
+pub(crate) const HELPERS: [&str; 3] = [HOST, ADAPTER, SDK_INTEL];
+/// What Steam launches leave in the runtime cache: the generations `prepare`
+/// extracts, their unfinished staging, and each launch's own folder.
+const GENERATION: &str = "runtime-v1-";
+const STAGING: &str = ".staging-";
+pub(crate) const LAUNCH: &str = "launch-";
+
+fn executable_helper(name: &str) -> bool {
+    matches!(name, HOST | SDK_INTEL)
+}
+
+#[derive(Deserialize)]
+pub struct Manifest {
+    pub version: String,
+    pub packages: Vec<SourcePackage>,
+    pub files: Vec<PayloadFile>,
+}
+#[derive(Deserialize)]
+pub struct SourcePackage {
+    pub name: String,
+    pub url: String,
+    pub size: u64,
+    pub sha256: String,
+}
+#[derive(Clone, Deserialize)]
+pub struct PayloadFile {
+    pub path: String,
+    pub package: String,
+    pub size: u64,
+    pub sha256: String,
+}
+pub fn manifest() -> &'static Manifest {
+    static VALUE: OnceLock<Manifest> = OnceLock::new();
+    VALUE.get_or_init(|| serde_json::from_str(MANIFEST).expect("checked-in runtime manifest"))
+}
+pub fn entry(path: &str) -> &'static PayloadFile {
+    manifest()
+        .files
+        .iter()
+        .find(|file| file.path == path)
+        .expect("checked-in runtime manifest")
+}
+pub(crate) fn check(cancelled: &AtomicBool) -> Result<(), Error> {
+    if cancelled.load(Ordering::Acquire) {
+        Err(Error::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+fn regular(path: &Path) -> Result<fs::Metadata, Error> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| Error::Unavailable)?;
+    if !metadata.file_type().is_file() {
+        return Err(Error::VersionMismatch);
+    }
+    Ok(metadata)
+}
+fn is_directory(path: &Path) -> Result<(), Error> {
+    if fs::symlink_metadata(path)?.file_type().is_dir() {
+        Ok(())
+    } else {
+        Err(Error::VersionMismatch)
+    }
+}
+fn verify_file(root: &Path, entry: &PayloadFile, cancelled: &AtomicBool) -> Result<(), Error> {
+    check(cancelled)?;
+    let path = root.join(&entry.path);
+    let metadata = regular(&path)?;
+    if metadata.len() != entry.size || crate::sha(&path)? != entry.sha256 {
+        return Err(Error::VersionMismatch);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if executable_helper(&entry.path) && metadata.permissions().mode() & 0o100 == 0 {
+            return Err(Error::VersionMismatch);
+        }
+    }
+    Ok(())
+}
+fn verify_tree(root: &Path, entries: &[PayloadFile], cancelled: &AtomicBool) -> Result<(), Error> {
+    is_directory(root)?;
+    let mut files = BTreeMap::new();
+    let mut directories = BTreeSet::new();
+    for entry in entries {
+        let path = Path::new(&entry.path);
+        if path.as_os_str().is_empty()
+            || path
+                .components()
+                .any(|c| !matches!(c, std::path::Component::Normal(_)))
+            || files.insert(path.to_path_buf(), entry).is_some()
+        {
+            return Err(Error::VersionMismatch);
+        }
+        let mut parent = path.parent();
+        while let Some(path) = parent.filter(|p| !p.as_os_str().is_empty()) {
+            directories.insert(path.to_path_buf());
+            parent = path.parent();
+        }
+    }
+    // Validate each ancestor before descending, and each regular file before
+    // hashing. No unvalidated path is opened, including symlinked parents.
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        is_directory(&directory)?;
+        for entry in fs::read_dir(directory)? {
+            check(cancelled)?;
+            let entry = entry?;
+            let path = entry.path();
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|_| Error::VersionMismatch)?;
+            let kind = entry.file_type()?;
+            if kind.is_dir() && directories.contains(relative) {
+                pending.push(path);
+            } else if kind.is_file() {
+                let expected = files.remove(relative).ok_or(Error::VersionMismatch)?;
+                verify_file(root, expected, cancelled)?;
+            } else {
+                return Err(Error::VersionMismatch);
+            }
+        }
+    }
+    if !files.is_empty() {
+        return Err(Error::VersionMismatch);
+    }
+    Ok(())
+}
+
+/// Inspect every archive entry before writing. Only exact manifest paths and
+/// ordinary files are accepted; ZIP paths are never used as arbitrary targets.
+/// It reads the central directory only: no entry is inflated.
+pub(crate) fn archive(
+    path: &Path,
+    entries: &[PayloadFile],
+) -> Result<zip::ZipArchive<File>, Error> {
+    if regular(path)?.len() > 128 * 1024 * 1024 {
+        return Err(Error::VersionMismatch);
+    }
+    let mut archive =
+        zip::ZipArchive::new(File::open(path)?).map_err(|_| Error::VersionMismatch)?;
+    if archive.len() != entries.len() {
+        return Err(Error::VersionMismatch);
+    }
+    let mut seen = BTreeSet::new();
+    for index in 0..archive.len() {
+        let file = archive
+            .by_index(index)
+            .map_err(|_| Error::VersionMismatch)?;
+        let expected = entries
+            .iter()
+            .find(|entry| entry.path == file.name())
+            .ok_or(Error::VersionMismatch)?;
+        if !seen.insert(file.name().to_owned())
+            || file.size() != expected.size
+            || !file.is_file()
+            || file
+                .unix_mode()
+                .is_some_and(|mode| ![0, 0o100000].contains(&(mode & 0o170000)))
+        {
+            return Err(Error::VersionMismatch);
+        }
+    }
+    Ok(archive)
+}
+pub(crate) fn copy_verified(
+    mut input: impl Read,
+    mut output: impl Write,
+    entry: &PayloadFile,
+    cancelled: &AtomicBool,
+) -> Result<(), Error> {
+    let mut digest = Sha256::new();
+    let mut size = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        check(cancelled)?;
+        let length = input
+            .read(&mut buffer)
+            .map_err(|_| Error::VersionMismatch)?;
+        if length == 0 {
+            break;
+        }
+        size += length as u64;
+        if size > entry.size {
+            return Err(Error::VersionMismatch);
+        }
+        digest.update(&buffer[..length]);
+        output.write_all(&buffer[..length])?;
+    }
+    if size != entry.size || format!("{:x}", digest.finalize()) != entry.sha256 {
+        return Err(Error::VersionMismatch);
+    }
+    Ok(())
+}
+pub(crate) fn verify(
+    path: &Path,
+    entries: &[PayloadFile],
+    cancelled: &AtomicBool,
+) -> Result<(), Error> {
+    let mut archive = archive(path, entries)?;
+    for entry in entries {
+        let file = archive
+            .by_name(&entry.path)
+            .map_err(|_| Error::VersionMismatch)?;
+        copy_verified(file, std::io::sink(), entry, cancelled)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn prepare(config: &Config, cancelled: &AtomicBool) -> Result<PathBuf, Error> {
+    prepare_with(config, &manifest().files, cancelled)
+}
+fn prepare_with(
+    config: &Config,
+    payload: &[PayloadFile],
+    cancelled: &AtomicBool,
+) -> Result<PathBuf, Error> {
+    check(cancelled)?;
+    let mut entries = payload.to_vec();
+    for name in HELPERS {
+        let path = config.helpers.join(name);
+        let metadata = regular(&path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if executable_helper(name) && metadata.permissions().mode() & 0o100 == 0 {
+                return Err(Error::Unavailable);
+            }
+        }
+        entries.push(PayloadFile {
+            path: name.into(),
+            package: String::new(),
+            size: metadata.len(),
+            sha256: crate::sha(&path)?,
+        });
+    }
+    let mut digest = Sha256::new();
+    // Hashes are fixed-width; paths are delimited, so different inventories cannot alias.
+    for entry in &entries {
+        digest.update(entry.path.as_bytes());
+        digest.update([0]);
+        digest.update(entry.sha256.as_bytes());
+    }
+    let prefix = format!("{GENERATION}{:x}-", digest.finalize());
+    super::files::private_directory(&config.cache)?;
+    // Sandbox literal rules use canonical paths (not macOS /var aliases).
+    let cache = config.cache.canonicalize()?;
+    let mut candidates = fs::read_dir(&cache)?.collect::<Result<Vec<_>, _>>()?;
+    candidates.sort_by_key(|entry| entry.file_name());
+    for candidate in candidates {
+        check(cancelled)?;
+        if candidate.file_name().to_string_lossy().starts_with(&prefix)
+            && candidate.file_type()?.is_dir()
+        {
+            match verify_tree(&candidate.path(), &entries, cancelled) {
+                Ok(()) => return Ok(candidate.path()),
+                Err(Error::Cancelled) => return Err(Error::Cancelled),
+                Err(_) => {} // Repair into a new directory; never alter a running runtime.
+            }
+        }
+    }
+    let mut archive = archive(&config.package, payload)?;
+    let staging = tempfile::Builder::new()
+        .prefix(STAGING)
+        .tempdir_in(&cache)?;
+    for entry in payload {
+        check(cancelled)?;
+        let target = staging.path().join(&entry.path);
+        fs::create_dir_all(target.parent().ok_or(Error::Storage)?)?;
+        let mut output = File::create(&target)?;
+        let input = archive
+            .by_name(&entry.path)
+            .map_err(|_| Error::VersionMismatch)?;
+        if let Err(error) = copy_verified(input, &mut output, entry, cancelled) {
+            // The payload lists the right files but holds other bytes: removed,
+            // the next Transfer or launch downloads it again.
+            if matches!(error, Error::VersionMismatch) {
+                let _ = fs::remove_file(&config.package);
+            }
+            return Err(error);
+        }
+        output.sync_all()?;
+    }
+    for name in HELPERS {
+        check(cancelled)?;
+        let target = staging.path().join(name);
+        fs::copy(config.helpers.join(name), &target)?;
+        File::open(target)?.sync_all()?;
+    }
+    verify_tree(staging.path(), &entries, cancelled)?;
+    check(cancelled)?;
+    let directory = cache.join(format!("{prefix}{}", uuid::Uuid::new_v4()));
+    // Unique immutable generations also make concurrent preparations safe.
+    fs::rename(staging.path(), &directory)?;
+    File::open(&cache)?.sync_all()?;
+    Ok(directory)
+}
+
+/// Removes from `cache` every generation, staging folder and launch folder
+/// but `generation` and `launch`, the current launch's, and nothing else: the
+/// payloads stay. Whatever cannot be removed goes with a later launch. Only
+/// the Steam supervisor calls it, after `prepare`: it holds the Steam
+/// sessions' owner lock, and starts no game while an earlier one still runs,
+/// so no other launch uses what goes. The lock lives in the library while the
+/// cache does not: two Obelisks with libraries of their own, as
+/// `OBELISK_LIBRARY_DIRECTORY` gives in development, must not both run Steam
+/// games.
+pub(crate) fn remove_stale(cache: &Path, generation: &Path, launch: &Path) {
+    let kept: Vec<_> = [generation, launch]
+        .iter()
+        .filter_map(|path| path.file_name())
+        .collect();
+    crate::voile::remove_entries(cache, |name| {
+        [GENERATION, STAGING, LAUNCH]
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+            && !kept.iter().any(|kept| **kept == *name)
+    });
+}
+
+#[cfg(test)]
+mod tests;
